@@ -1,75 +1,83 @@
-import os
-import glob
-from eval_harness.adapter import RAGPipelineAdapter
-from sentence_transformers import SentenceTransformer, CrossEncoder
-import chromadb
-from rank_bm25 import BM25Okapi
+import math
+from collections import defaultdict
 
 class LocalPipeline(RAGPipelineAdapter):
     def __init__(self):
-        self.embed_model = SentenceTransformer('all-MiniLM-L6-v2')
-        self.rerank_model = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')
-        
-        self.documents = []
-        self.ids = []
-        for filepath in glob.glob("data/*.txt"):
-            doc_id = os.path.basename(filepath).replace(".txt", "")
-            with open(filepath, "r") as f:
-                text = f.read().strip()
-                self.documents.append(text)
-                self.ids.append(doc_id)
-                
+        self.model = SentenceTransformer('all-MiniLM-L6-v2')
         self.client = chromadb.Client()
         try:
             self.client.delete_collection(name="rag_docs")
         except:
             pass
         self.collection = self.client.create_collection(name="rag_docs")
-        
-        if self.documents:
-            embeddings = self.embed_model.encode(self.documents).tolist()
-            self.collection.add(embeddings=embeddings, documents=self.documents, ids=self.ids)
-            
-        tokenized_corpus = [doc.lower().split(" ") for doc in self.documents]
-        self.bm25 = BM25Okapi(tokenized_corpus)
+        documents = []
+        ids = []
+        for filepath in glob.glob("data/*.txt"):
+            doc_id = os.path.basename(filepath).replace(".txt", "")
+            with open(filepath, "r") as f:
+                text = f.read().strip()
+                documents.append(text)
+                ids.append(doc_id)
+        if documents:
+            embeddings = self.model.encode(documents).tolist()
+            self.collection.add(
+                embeddings=embeddings,
+                documents=documents,
+                ids=ids
+            )
+
+    def _bm25_score(self, query_tokens, tokenized_docs):
+        N = len(tokenized_docs)
+        df = defaultdict(int)
+        for doc in tokenized_docs:
+            unique_terms = set(doc)
+            for term in unique_terms:
+                df[term] += 1
+        idf = {}
+        for term, freq in df.items():
+            idf[term] = math.log(1 + (N - freq + 0.5) / (freq + 0.5))
+        scores = []
+        avgdl = sum(len(doc) for doc in tokenized_docs) / N
+        k1 = 1.5
+        b = 0.75
+        for doc in tokenized_docs:
+            score = 0.0
+            term_freq = defaultdict(int)
+            for term in doc:
+                term_freq[term] += 1
+            for term in query_tokens:
+                if term in term_freq:
+                    tf = term_freq[term]
+                    denom = tf + k1 * (1 - b + b * len(doc) / avgdl)
+                    score += idf.get(term, 0) * (tf * (k1 + 1)) / denom
+            scores.append(score)
+        return scores
 
     def retrieve(self, query: str, k: int, mode: str) -> list[str]:
-        if not self.documents:
+        query_embedding = self.model.encode([query]).tolist()
+        # Increase candidate pool for reranking
+        candidate_k = min(k * 2, 1000)
+        results = self.collection.query(
+            query_embeddings=query_embedding,
+            n_results=candidate_k
+        )
+        if not results or not results.get('ids'):
             return []
-
-        if mode == "dense":
-            query_embedding = self.embed_model.encode([query]).tolist()
-            results = self.collection.query(query_embeddings=query_embedding, n_results=k)
-            return results['ids'][0] if results['ids'] else []
-
-        elif mode == "lexical":
-            tokenized_query = query.lower().split(" ")
-            scores = self.bm25.get_scores(tokenized_query)
-            ranked_indices = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:k]
-            return [self.ids[i] for i in ranked_indices]
-
-        elif mode == "hybrid_rerank":
-            dense_res = self.retrieve(query, k=10, mode="dense")
-            lexical_res = self.retrieve(query, k=10, mode="lexical")
-            
-            rrf_scores = {}
-            for rank, doc_id in enumerate(dense_res):
-                rrf_scores[doc_id] = rrf_scores.get(doc_id, 0) + (1.0 / (60 + rank + 1))
-            for rank, doc_id in enumerate(lexical_res):
-                rrf_scores[doc_id] = rrf_scores.get(doc_id, 0) + (1.0 / (60 + rank + 1))
-                
-            fused_docs = sorted(rrf_scores.keys(), key=lambda x: rrf_scores[x], reverse=True)[:10]
-            doc_text_map = {self.ids[i]: self.documents[i] for i in range(len(self.ids))}
-            pairs = [[query, doc_text_map[doc_id]] for doc_id in fused_docs]
-            
-            if not pairs:
-                return []
-                
-            rerank_scores = self.rerank_model.predict(pairs)
-            reranked = sorted(zip(fused_docs, rerank_scores), key=lambda x: x[1], reverse=True)
-            return [doc_id for doc_id, score in reranked[:k]]
-
-        return []
+        candidate_ids = results['ids'][0]
+        # Fetch documents for candidate ids
+        docs_res = self.collection.get(ids=candidate_ids)
+        candidate_docs = docs_res.get('documents', [])
+        # Tokenize query and documents
+        query_tokens = query.lower().split()
+        tokenized_docs = [doc.lower().split() for doc in candidate_docs]
+        # Compute BM25 scores
+        scores = self._bm25_score(query_tokens, tokenized_docs)
+        # Pair ids with scores and sort
+        id_score_pairs = list(zip(candidate_ids, scores))
+        id_score_pairs.sort(key=lambda x: x[1], reverse=True)
+        # Return top-k ids after reranking
+        reranked_ids = [pair[0] for pair in id_score_pairs[:k]]
+        return reranked_ids
 
     def generate(self, query: str, chunk_ids: list[str]) -> str:
         return f"Based on {chunk_ids}, the answer is found."

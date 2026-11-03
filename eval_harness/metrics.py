@@ -1,8 +1,6 @@
 def calculate_recall_at_k(retrieved_ids: list[str], gold_ids: list[str], k: int) -> float:
-    """
-    Recall@k: The fraction of gold documents found in the top-k retrieved.
-    """
-    if not gold_ids:
+    # SAFETY CHECK: If retrieved_ids is None or empty, score is 0
+    if not gold_ids or not retrieved_ids:
         return 0.0
     
     top_k_retrieved = retrieved_ids[:k]
@@ -10,10 +8,10 @@ def calculate_recall_at_k(retrieved_ids: list[str], gold_ids: list[str], k: int)
     return relevant_found / len(gold_ids)
 
 def calculate_mrr_at_k(retrieved_ids: list[str], gold_ids: list[str], k: int) -> float:
-    """
-    MRR@k: The reciprocal rank of the FIRST relevant document found in top-k.
-    (If the first relevant doc is at rank 1, score is 1.0. Rank 2 = 0.5. Rank 3 = 0.33)
-    """
+    # SAFETY CHECK: If retrieved_ids is None or empty, score is 0
+    if not retrieved_ids:
+        return 0.0
+        
     top_k_retrieved = retrieved_ids[:k]
     for rank, doc_id in enumerate(top_k_retrieved, start=1):
         if doc_id in gold_ids:
