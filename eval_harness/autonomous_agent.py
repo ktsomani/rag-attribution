@@ -7,23 +7,23 @@ from eval_harness.proposer import propose_harness_fix
 def _run_eval_subprocess():
     """Synchronous subprocess call wrapped in a thread."""
     env = os.environ.copy()
-    env["PYTHONIOENCODING"] = "utf-8" # Force UTF-8 for Windows subprocess
+    env["PYTHONIOENCODING"] = "utf-8"
     
-    result = subprocess.run(
-        ["uv", "run", "python", "-m", "eval_harness.run_retrieval"],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="ignore",
-        env=env
-    )
-    return result.stdout, result.stderr
+    try:
+        result = subprocess.run(
+            ["uv", "run", "python", "-m", "eval_harness.run_retrieval"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="ignore",
+            env=env,
+            timeout=120 # <--- TIMEOUT ADDED HERE
+        )
+        return result.stdout, result.stderr
+    except subprocess.TimeoutExpired:
+        return "", "TimeoutExpired: The evaluation took longer than 120 seconds."
 
 async def run_real_evaluation(adapter_file: str) -> float:
-    """
-    Runs the evaluation harness in an isolated subprocess with a timeout.
-    Parses the actual stdout to extract the MRR.
-    """
     original_adapter = os.path.abspath("eval_harness/real_adapter.py")
     backup_adapter = os.path.abspath("eval_harness/real_adapter_backup.py")
     target_adapter = os.path.abspath(adapter_file)
@@ -35,7 +35,6 @@ async def run_real_evaluation(adapter_file: str) -> float:
         shutil.copy(target_adapter, original_adapter)
 
     try:
-        # Use thread to run subprocess with timeout
         stdout, stderr = await asyncio.to_thread(_run_eval_subprocess)
         
         mrr = 0.0
@@ -45,7 +44,6 @@ async def run_real_evaluation(adapter_file: str) -> float:
                 mrr = float(parts[2].strip())
         
         if mrr == 0.0 and stderr:
-            # Print the first few lines of stderr to debug crashes
             print(f"⚠️ Subprocess STDERR (first 500 chars):\n{stderr[:500]}...")
 
         return mrr
@@ -55,7 +53,6 @@ async def run_real_evaluation(adapter_file: str) -> float:
         return 0.0
         
     finally:
-        # Restore original adapter ONLY if we swapped it
         if is_staging:
             shutil.copy(backup_adapter, original_adapter)
             os.remove(backup_adapter)
@@ -63,28 +60,25 @@ async def run_real_evaluation(adapter_file: str) -> float:
 async def run_autonomous_loop():
     print("🚀 Starting Autonomous Self-Healing RAG Loop...\n")
     
-    # 1. Run Baseline
     print("📊 Running Baseline Evaluation...")
     baseline_mrr = await run_real_evaluation("eval_harness/real_adapter.py")
     print(f"📊 Baseline MRR: {baseline_mrr}")
     
-    # 2. Trigger Proposer
     print("\n⚠️ Triggering Proposer...")
     with open("eval_harness/real_adapter.py", "r", encoding="utf-8") as f:
         broken_code = f.read()
         
-    fixed_code =await propose_harness_fix({"mrr": baseline_mrr}, broken_code)
+    # AWAIT ADDED HERE
+    fixed_code = await propose_harness_fix({"mrr": baseline_mrr}, broken_code)
     
     staging_file = "eval_harness/real_adapter_staging.py"
     with open(staging_file, "w", encoding="utf-8") as f:
         f.write(fixed_code)
         
-    # 3. Run Eval on Staged Code
     print("\n🧪 Testing the Proposer's fix in Sandbox...")
     staged_mrr = await run_real_evaluation(staging_file)
     print(f"📊 Staged MRR: {staged_mrr}")
     
-    # 4. CI Gate
     print("\n🚦 CI Gate Decision:")
     if staged_mrr > baseline_mrr:
         print("✅ PASS: MRR improved. Promoting patch.")

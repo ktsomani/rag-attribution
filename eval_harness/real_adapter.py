@@ -16,7 +16,6 @@ class LocalPipeline(RAGPipelineAdapter):
         self.documents = []
         self.ids = []
         
-        # Removed emojis for Windows subprocess compatibility
         filepaths = []
         for root, dirs, files in os.walk(DATA_DIR):
             for file in files:
