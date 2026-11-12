@@ -1,59 +1,90 @@
 import os
 import shutil
+import asyncio
+import json
 import subprocess
 from eval_harness.proposer import propose_harness_fix
 
-def run_evaluation(adapter_file: str) -> dict:
-    """Runs the evaluation harness and returns the results."""
-    # For this demo, we simulate reading the failure mix.
-    # In production, you would run your run_retrieval.py and parse the JSON output.
-    # If the file is the baseline, we simulate high failure. If it's the fixed version, we simulate success.
-    if adapter_file == "eval_harness/real_adapter.py":
-        return {"retrieval_gap": 0.05, "rank_inversion": 0.35, "evidence_under_use": 0.10}
-    else:
-        return {"retrieval_gap": 0.05, "rank_inversion": 0.00, "evidence_under_use": 0.05}
+async def run_real_evaluation(adapter_file: str) -> dict:
+    """
+    Runs the evaluation harness in an isolated subprocess with a timeout.
+    Parses the actual stdout to extract the MRR.
+    """
+    # Temporarily swap the adapter file
+    original_adapter = "eval_harness/real_adapter.py"
+    backup_adapter = "eval_harness/real_adapter_backup.py"
+    shutil.copy(original_adapter, backup_adapter)
+    shutil.copy(adapter_file, original_adapter)
 
-def run_autonomous_loop():
+    try:
+        # SANDBOX FIX: Use subprocess with timeout and capture output
+        process = await asyncio.create_subprocess_shell(
+            "uv run python -m eval_harness.run_retrieval",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        
+        try:
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=60.0)
+            output = stdout.decode()
+            
+            # REAL EVALUATION FIX: Parse the actual output
+            # Look for the hybrid_rerank line: "hybrid_rerank | 0.803 | 0.634"
+            mrr = 0.0
+            for line in output.split("\n"):
+                if line.startswith("hybrid_rerank"):
+                    parts = line.split("|")
+                    mrr = float(parts[2].strip())
+            
+            return {"status": "success", "mrr": mrr, "output": output}
+
+        except asyncio.TimeoutError:
+            process.kill()
+            return {"status": "timeout", "mrr": 0.0, "error": "Sandbox timeout"}
+            
+    except Exception as e:
+        return {"status": "exception", "mrr": 0.0, "error": str(e)}
+        
+    finally:
+        # Restore original adapter
+        shutil.copy(backup_adapter, original_adapter)
+        os.remove(backup_adapter)
+
+async def run_autonomous_loop():
     print("🚀 Starting Autonomous Self-Healing RAG Loop...\n")
     
-    # 1. Run Baseline Evaluation
-    baseline_failures = run_evaluation("eval_harness/real_adapter.py")
-    print(f"📊 Baseline Failure Mix: {baseline_failures}")
+    # 1. Run Baseline
+    baseline_result = await run_real_evaluation("eval_harness/real_adapter.py")
+    baseline_mrr = baseline_result["mrr"]
+    print(f"📊 Baseline MRR: {baseline_mrr}")
     
-    # 2. Check if we need to intervene (e.g., Rank Inversion > 20%)
-    if baseline_failures["rank_inversion"] < 0.20:
-        print("✅ System is healthy. No intervention needed.")
-        return
-
-    print("\n⚠️ High Rank Inversion detected. Triggering Proposer...")
-    
-    # 3. Read the broken code and ask the LLM to fix it
-    with open("eval_harness/real_adapter.py", "r", encoding="utf-8") as f:
+    # 2. Trigger Proposer
+    print("\n⚠️ Triggering Proposer...")
+    with open("eval_harness/real_adapter.py", "r") as f:
         broken_code = f.read()
-
-    fixed_code = propose_harness_fix(baseline_failures, broken_code)
+        
+    # Note: In reality, you'd pass a real failure report here. 
+    # For the demo, we pass the MRR.
+    fixed_code = propose_harness_fix({"mrr": baseline_mrr}, broken_code)
     
-    # 4. Save the proposed fix to a staging file
     staging_file = "eval_harness/real_adapter_staging.py"
     with open(staging_file, "w") as f:
         f.write(fixed_code)
-    print(f"📝 Proposer generated new code at {staging_file}")
+        
+    # 3. Run Eval on Staged Code
+    print("\n🧪 Testing the Proposer's fix in Sandbox...")
+    staged_result = await run_real_evaluation(staging_file)
+    staged_mrr = staged_result["mrr"]
+    print(f"📊 Staged MRR: {staged_mrr}")
     
-    # 5. Run Evaluation on the Staging File
-    print("\n🧪 Testing the Proposer's fix...")
-    new_failures = run_evaluation(staging_file)
-    print(f"📊 Staged Failure Mix: {new_failures}")
-    
-    # 6. The CI Gate: Did the fix actually work?
+    # 4. CI Gate
     print("\n🚦 CI Gate Decision:")
-    if new_failures["rank_inversion"] < baseline_failures["rank_inversion"]:
-        print("✅ PASS: Rank Inversion decreased. Committing new harness.")
-        # Overwrite the original file with the fixed one
+    if staged_mrr > baseline_mrr:
+        print("✅ PASS: MRR improved. Promoting patch.")
         shutil.copy(staging_file, "eval_harness/real_adapter.py")
     else:
-        print("❌ FAIL: The fix did not improve metrics. Rolling back.")
-        # Delete the staging file
+        print("❌ FAIL: MRR did not improve. Quarantining patch.")
         os.remove(staging_file)
 
 if __name__ == "__main__":
-    run_autonomous_loop()
+    asyncio.run(run_autonomous_loop())
