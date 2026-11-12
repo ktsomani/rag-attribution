@@ -73,7 +73,7 @@ async def run_autonomous_loop():
     with open("eval_harness/real_adapter.py", "r", encoding="utf-8") as f:
         broken_code = f.read()
         
-    fixed_code = propose_harness_fix({"mrr": baseline_mrr}, broken_code)
+    fixed_code =await propose_harness_fix({"mrr": baseline_mrr}, broken_code)
     
     staging_file = "eval_harness/real_adapter_staging.py"
     with open(staging_file, "w", encoding="utf-8") as f:
