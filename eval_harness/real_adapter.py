@@ -1,4 +1,5 @@
 import os
+import glob
 from eval_harness.adapter import RAGPipelineAdapter
 from sentence_transformers import SentenceTransformer, CrossEncoder
 import chromadb
@@ -9,20 +10,20 @@ DATA_DIR = os.path.join(BASE_DIR, "data")
 
 class LocalPipeline(RAGPipelineAdapter):
     def __init__(self):
-        print("Loading local models...")
         self.embed_model = SentenceTransformer('all-MiniLM-L6-v2')
         self.rerank_model = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')
         
         self.documents = []
         self.ids = []
         
+        # Removed emojis for Windows subprocess compatibility
         filepaths = []
         for root, dirs, files in os.walk(DATA_DIR):
             for file in files:
                 if file.endswith(".txt") or file.endswith(".md"):
                     filepaths.append(os.path.join(root, file))
                     
-        print(f"🔍 DEBUG: Found {len(filepaths)} files in {DATA_DIR}")
+        print(f"[DEBUG] Found {len(filepaths)} files in {DATA_DIR}")
         
         for filepath in filepaths:
             doc_id = os.path.basename(filepath).split(".")[0] 

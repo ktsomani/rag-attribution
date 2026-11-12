@@ -7,7 +7,6 @@ from eval_harness.real_adapter import LocalPipeline
 from eval_harness.cost_tracker import calculate_run_cost
 
 def calculate_metrics(retrieved_ids, gold_ids, k):
-    # ... (keep your existing calculate_metrics function exactly the same) ...
     if not retrieved_ids or not gold_ids:
         return 0.0, 0.0, 0.0
     top_k = retrieved_ids[:k]
@@ -28,7 +27,6 @@ def calculate_metrics(retrieved_ids, gold_ids, k):
     return recall, mrr, ndcg
 
 async def evaluate_query(pipeline, q, k, mode):
-    """Runs a single query asynchronously in a threadpool."""
     retrieved = await run_in_threadpool(pipeline.retrieve, q["question"], k=k, mode=mode)
     return calculate_metrics(retrieved, q["gold_doc_ids"], k)
 
@@ -53,7 +51,7 @@ async def run_retrieval_eval():
     for mode in modes:
         answerable_qs = [q for q in questions if q["stratum"] == "answerable"]
         
-        # ASYNC FIX: Run all queries concurrently using asyncio.gather
+        # THE ASYNC FIX: Run all queries concurrently
         tasks = [evaluate_query(pipeline, q, k, mode) for q in answerable_qs]
         results = await asyncio.gather(*tasks)
         
@@ -67,18 +65,14 @@ async def run_retrieval_eval():
             print(f"{mode:<15} | {total_recall/count:<10.3f} | {total_mrr/count:<10.3f} | {total_ndcg/count:<10.3f}")
 
     # Cost tracking
-    avg_input_tokens = 100
-    avg_output_tokens = 50
-    total_input_tokens = total_queries * avg_input_tokens
-    total_output_tokens = total_queries * avg_output_tokens
+    total_input_tokens = total_queries * 100
+    total_output_tokens = total_queries * 50
     costs = calculate_run_cost(total_input_tokens, total_output_tokens)
     
     print("\n" + "="*55)
     print("💰 EVALUATION RUN COST REPORT")
     print("="*55)
     print(f"Total Queries Evaluated: {total_queries}")
-    print(f"Estimated Input Tokens:  {total_input_tokens}")
-    print(f"Estimated Output Tokens: {total_output_tokens}")
     print(f"Estimated Total Cost:    ${costs['total_cost_usd']}")
     print("="*55 + "\n")
 
